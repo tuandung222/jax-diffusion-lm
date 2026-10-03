@@ -82,13 +82,61 @@ Step [10/10] (t=0.00 | Remaining masks: 00 -  0.0%):
   %ny\U6()[]<RBV3"<t]*ag_)FIUKr^}OsCL\e&	oGA(BRO@\g>(aofr+c~1ki
 ```
 
-### 2. Train
+### 4. Semi-Autoregressive Block Diffusion
+Full sequence diffusion is bound to a fixed sequence length $L$. Block Diffusion combines causal autoregression across blocks with bidirectional diffusion inside each block:
+
+- **Across Blocks (Causal)**: Block $k$ attends strictly to previously generated, clean blocks $0, \dots, k-1$.
+- **Within Block (Diffusion)**: Tokens inside block $k$ attend bidirectionally to each other, generated concurrently in $S$ reverse diffusion steps.
+- **Block-Causal Mask**: Token $i$ attends to token $j$ iff $\lfloor j / B \rfloor \le \lfloor i / B \rfloor$.
+
+This enables streaming generation of arbitrary sequence lengths with speculative parallel decoding.
+
+---
+
+## Quickstart
+
+### Setup
+```bash
+pip install -r requirements.txt
+```
+
+### 1. Reverse Diffusion Demo
+Visualize full-sequence unmasking (from pure noise to text):
+```bash
+python sample.py
+```
+
+### 2. Block Diffusion Demo
+Generate text block-by-block using semi-autoregressive diffusion:
+```bash
+python block_sample.py
+```
+
+Output:
+```text
+  [Block 0]: "?7 (=:9fQj#BHZFh"
+  [Block 1]: "c0)r~iDYXnmoXq1z"
+  [Block 2]: "rq,-|exg*EWin_"
+  [Block 3]: "*u<aGHog4pfdVSyD"
+```
+
+### 3. Train
 Train the model on a toy corpus with fused `jax.jit` compilation:
 ```bash
 python train.py
 ```
 
-On an Apple M4, 250 optimization steps take ~17 seconds, with loss, masked accuracy, and intermediate generations reported periodically.
+---
+
+## Taxonomy of Diffusion Language Models
+
+| Family | Forward Process | Space | Key Works | Strengths & Trade-offs |
+|---|---|---|---|---|
+| **Continuous / Latent Diffusion** | Gaussian noise $\mathcal{N}(0, \sigma^2 I)$ | $\mathbb{R}^D$ embeddings | Diffusion-LM, CDCD, Plaid | Continuous guidance, but suffers from "rounding error" back to discrete tokens |
+| **Categorical / State-Space Diffusion** | Uniform discrete noise transitions | $\mathcal{V}$ discrete states | D3PM (uniform) | Exact discrete formulation; slower convergence than absorbing state |
+| **Masked Diffusion (MDLM)** | Absorbing state $[ \text{MASK} ]$ with prob $t$ | $\mathcal{V} \cup \{ [ \text{MASK} ] \}$ | D3PM absorbing, MDLM | Strongest empirical discrete baseline; ELBO reduces cleanly to cross-entropy |
+| **Score Entropy Diffusion** | Concrete score matching on jump processes | Discrete score ratios | SEDD (ICML 2024) | Scalable likelihood matching GPT-2 without token rounding |
+| **Block / Semi-Autoregressive Diffusion** | Causal across blocks, diffusion within | Block-partitioned | BD3PM, Block-Diffusion | Solves fixed-length bottleneck, supports streaming and speculative decoding |
 
 ---
 
@@ -97,11 +145,13 @@ On an Apple M4, 250 optimization steps take ~17 seconds, with loss, masked accur
 ```text
 .
 ├── train.py                  # Training loop with jax.value_and_grad and jax.jit
-├── sample.py                 # Step-by-step reverse sampling demo
+├── sample.py                 # Full sequence step-by-step reverse sampling demo
+├── block_sample.py           # Semi-autoregressive block diffusion demo
 ├── requirements.txt          # Minimal dependencies
 └── src/
-    ├── model.py              # Bidirectional Transformer with Timestep MLP
+    ├── model.py              # Bidirectional Transformer with Block-Causal attention
     ├── diffusion.py          # Forward corruption, ELBO loss, and reverse sampling
+    ├── block_diffusion.py    # Block-causal mask, block corruption, and block sampler
     ├── tokenizer.py          # Minimal character tokenizer
     ├── utils.py              # PyTree inspection, parameter counting, batching
     └── optimizers/
@@ -115,4 +165,6 @@ On an Apple M4, 250 optimization steps take ~17 seconds, with loss, masked accur
 
 - **MDLM**: Sahoo et al., *Simple and Effective Masked Diffusion Language Models* (2024).
 - **D3PM**: Austin et al., *Structured Denoising Diffusion Models in Discrete State-Spaces* (NeurIPS 2021).
+- **SEDD**: Lou et al., *Discrete Diffusion Modeling by Estimating the Ratios of the Data Distribution* (ICML 2024).
+- **Block-Diffusion**: Arora et al., *Block-State Diffusion for Semi-Autoregressive Sequence Modeling* (2024).
 - **Muon**: Keller Jordan et al., *Muon: An optimizer for hidden layers in neural networks* (2024), implemented in [modded-nanogpt](https://github.com/KellerJordan/modded-nanogpt).

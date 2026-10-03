@@ -29,7 +29,7 @@ CORE ARCHITECTURAL CHARACTERISTICS FOR DIFFUSION LM:
    - Operations are expressed as pure functions: `init_transformer_params` and `forward_transformer`.
 """
 
-from typing import Dict, Any, Tuple
+from typing import Dict, Any, Tuple, Optional
 import math
 import jax
 import jax.numpy as jnp
@@ -189,10 +189,11 @@ def bidirectional_attention(
     qkv_b: jnp.ndarray,
     out_w: jnp.ndarray,
     out_b: jnp.ndarray,
-    num_heads: int
+    num_heads: int,
+    attn_mask: Optional[jnp.ndarray] = None
 ) -> jnp.ndarray:
     """
-    Multi-Head Bidirectional Self-Attention.
+    Multi-Head Bidirectional / Block-Causal Self-Attention.
 
     TENSOR SHAPES & FLOW:
     ---------------------
@@ -201,6 +202,7 @@ def bidirectional_attention(
     - Split into Q, K, V each of shape: (B, L, D).
     - Reshape & Transpose: (B, num_heads, L, head_dim) where head_dim = D // num_heads.
     - Scaled Dot-Product: Scores = (Q @ K^T) / sqrt(head_dim) -> (B, num_heads, L, L).
+    - Optional Mask: Applies boolean mask (e.g. Block-Causal mask) where False -> -1e9.
     - Softmax: Attention Weights -> (B, num_heads, L, L).
     - Context Aggregation: Weights @ V -> (B, num_heads, L, head_dim).
     - Concatenate & Output Projection: (B, L, D) @ (D, D) -> (B, L, D).
@@ -217,9 +219,13 @@ def bidirectional_attention(
     k = jnp.transpose(jnp.reshape(k, (B, L, num_heads, head_dim)), (0, 2, 1, 3))  # (B, H, L, d_k)
     v = jnp.transpose(jnp.reshape(v, (B, L, num_heads, head_dim)), (0, 2, 1, 3))  # (B, H, L, d_k)
 
-    # 3. Scaled Dot-Product Attention (No causal mask; unconstrained bidirectional view)
+    # 3. Scaled Dot-Product Attention with optional masking
     scale = 1.0 / math.sqrt(head_dim)
     scores = jnp.matmul(q, jnp.transpose(k, (0, 1, 3, 2))) * scale  # (B, H, L, L)
+    
+    if attn_mask is not None:
+        scores = jnp.where(attn_mask, scores, -1e9)
+        
     attn_weights = jax.nn.softmax(scores, axis=-1)
 
     # 4. Multiply with Value vectors
@@ -235,7 +241,8 @@ def forward_transformer(
     params: Dict[str, Any],
     token_ids: jnp.ndarray,
     timesteps: jnp.ndarray,
-    num_heads: int = 8
+    num_heads: int = 8,
+    attn_mask: Optional[jnp.ndarray] = None
 ) -> jnp.ndarray:
     """
     Forward pass of the Diffusion Transformer architecture.
@@ -276,7 +283,8 @@ def forward_transformer(
             layer["qkv_b"],
             layer["out_w"],
             layer["out_b"],
-            num_heads=num_heads
+            num_heads=num_heads,
+            attn_mask=attn_mask
         )
         h = h + attn_out
 
