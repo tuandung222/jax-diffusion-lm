@@ -1,0 +1,6 @@
+# Pure JAX Diffusion Language Model Dependencies
+# Tối thiểu hóa phụ thuộc - Chỉ dùng JAX và numpy chuẩn
+
+jax>=0.4.30
+jaxlib>=0.4.30
+numpy>=1.24.0
