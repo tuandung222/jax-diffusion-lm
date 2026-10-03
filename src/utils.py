@@ -1,9 +1,9 @@
 """
 ================================================================================
-MÔ-ĐUN TIỆN ÍCH: PURE JAX UTILS & PYTREE HELPERS
+UTILITY MODULE: PURE JAX HELPERS & PYTREE INSPECTION
 ================================================================================
-Cung cấp các công cụ hỗ trợ cho việc đếm tham số, phân tích cấu trúc PyTree,
-tạo lô huấn luyện (Batching), và in tóm tắt mô hình.
+Provides utility functions for counting parameters, inspecting PyTree structures,
+batch preparation, and displaying model parameter summaries.
 """
 
 from typing import Dict, Any, Tuple, List
@@ -14,13 +14,13 @@ from .optimizers.muon import default_is_muon_leaf, LeafMuonState, LeafAdamWState
 
 def count_parameters(params: Any) -> Dict[str, int]:
     """
-    Đếm số lượng tham số trong mô hình và phân loại theo thuật toán tối ưu hóa.
+    Counts total model parameters and categorizes them by optimizer algorithm.
 
     Returns:
-        Từ điển chứa:
-        - "total": Tổng số tham số.
-        - "muon_params": Số tham số tối ưu bằng thuật toán Muon (các ma trận 2D).
-        - "adamw_params": Số tham số tối ưu bằng AdamW (embeddings, biases, normalizations).
+        Dictionary containing:
+        - "total": Total parameter count.
+        - "muon_params": Parameters updated via Muon (2D weight matrices).
+        - "adamw_params": Parameters updated via AdamW (embeddings, biases, norms).
     """
     total = sum(x.size for x in jax.tree_util.tree_leaves(params))
     
@@ -45,11 +45,12 @@ def count_parameters(params: Any) -> Dict[str, int]:
 
 def print_model_summary(params: Any):
     """
-    In bảng tóm tắt chi tiết cấu trúc mô hình, kích thước từng tầng và phân bổ Optimizer.
+    Prints a detailed architectural summary table showing parameter paths,
+    tensor shapes, and assigned optimizer algorithms.
     """
     counts = count_parameters(params)
     print("=" * 75)
-    print(f"{'TÊN THAM SỐ (PYTREE PATH)':<42} | {'KÍCH THƯỚC':<16} | {'OPTIMIZER':<8}")
+    print(f"{'PARAMETER NAME (PYTREE PATH)':<42} | {'SHAPE':<16} | {'OPTIMIZER':<8}")
     print("-" * 75)
 
     def _print_leaf(path, p):
@@ -60,28 +61,29 @@ def print_model_summary(params: Any):
 
     jax.tree_util.tree_map_with_path(_print_leaf, params)
     print("=" * 75)
-    print(f"Tổng số tham số:        {counts['total']:,}")
-    print(f"- Ma trận tối ưu Muon:  {counts['muon_params']:,} ({counts['muon_params']/counts['total']*100:.1f}%)")
-    print(f"- Tham số tối ưu AdamW: {counts['adamw_params']:,} ({counts['adamw_params']/counts['total']*100:.1f}%)")
+    print(f"Total Parameters:       {counts['total']:,}")
+    print(f"- Muon 2D Matrices:     {counts['muon_params']:,} ({counts['muon_params']/counts['total']*100:.1f}%)")
+    print(f"- AdamW Biases/Embeds:  {counts['adamw_params']:,} ({counts['adamw_params']/counts['total']*100:.1f}%)")
     print("=" * 75)
 
 
 def prepare_dataset(text: str, tokenizer: Any, seq_len: int) -> jnp.ndarray:
     """
-    Mã hóa chuỗi văn bản dài thành một ma trận các đoạn có độ dài cố định seq_len.
+    Encodes an input text string into a 2D matrix of non-overlapping chunks
+    of fixed sequence length `seq_len`.
 
     Args:
-        text: Toàn bộ văn bản huấn luyện.
-        tokenizer: Đối tượng CharTokenizer.
-        seq_len: Độ dài mỗi đoạn văn bản.
+        text: Raw training text.
+        tokenizer: Initialized CharTokenizer instance.
+        seq_len: Target sequence length for each chunk.
 
     Returns:
-        Mảng 2D (num_samples, seq_len) kiểu jnp.int32.
+        2D array of shape (num_samples, seq_len) with dtype jnp.int32.
     """
     tokens = tokenizer.encode(text)
     num_chunks = len(tokens) // seq_len
     if num_chunks == 0:
-        raise ValueError(f"Văn bản quá ngắn so với độ dài seq_len={seq_len}!")
+        raise ValueError(f"Input text is too short for sequence length seq_len={seq_len}!")
         
     usable_tokens = tokens[: num_chunks * seq_len]
     dataset = jnp.array(usable_tokens, dtype=jnp.int32).reshape((num_chunks, seq_len))

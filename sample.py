@@ -1,10 +1,11 @@
 """
 ================================================================================
-SCRIPT SINH VĂN BẢN TRỰC QUAN: STEP-BY-STEP DIFFUSION VISUALIZATION
+SAMPLING SCRIPT: STEP-BY-STEP DIFFUSION TRAJECTORY VISUALIZATION
 ================================================================================
-Trình diễn trực quan từng bước unmasking (khử nhiễu) của mô hình Discrete Diffusion LM.
-Giúp người học quan sát trực tiếp cách một chuỗi văn bản mạch lạc dần dần hình thành
-từ một chuỗi nhiễu mặt nạ đen đặc (████████).
+Demonstrates the step-by-step unmasking (denoising) trajectory of a Discrete
+Masked Diffusion Language Model.
+Allows learners to observe how a coherent text sequence gradually emerges
+from an initial block of pure mask noise (████████).
 """
 
 from typing import List, Dict, Any
@@ -26,18 +27,19 @@ def visualize_sampling_trajectory(
     num_heads: int = 4
 ):
     """
-    Chạy quá trình Reverse Diffusion và in ra trạng thái chuỗi ký tự tại từng bước lặp.
+    Executes Reverse Diffusion sampling while logging intermediate token states
+    at each discrete timestep.
     """
     print("=" * 75)
-    print(" QUAN SÁT TIẾN TRÌNH KHỬ NHIỄU KHUẾCH TÁN (STEP-BY-STEP DENOISING)")
-    print(f" Số bước khuếch tán ngược: {num_steps} | Độ dài: {seq_len} ký tự | Nhiệt độ: {temperature}")
+    print(" VISUALIZING REVERSE DIFFUSION DENOISING TRAJECTORY")
+    print(f" Reverse Steps: {num_steps} | Length: {seq_len} chars | Temperature: {temperature}")
     print("=" * 75)
 
-    # Bắt đầu tại t=1.0: Mọi vị trí đều là [MASK] (hiển thị bằng ký tự █)
+    # Start at t = 1.0: Entire sequence is masked (rendered visually as █)
     x = jnp.full((1, seq_len), tokenizer.mask_id, dtype=jnp.int32)
     dt = 1.0 / float(num_steps)
 
-    print(f"Bước [00/{num_steps:02d}] (t=1.00 - Nhiễu 100%):")
+    print(f"Step [00/{num_steps:02d}] (t=1.00 - 100% Noise):")
     print(f"  {tokenizer.decode(list(x[0]))}\n")
 
     for step in range(num_steps):
@@ -47,12 +49,12 @@ def visualize_sampling_trajectory(
 
         rng, rng_step, rng_unmask = jax.random.split(rng, 3)
 
-        # 1. Dự đoán phân phối sạch x_0
+        # 1. Model predicts clean token distribution x_0
         logits = forward_transformer(params, x, t_arr, num_heads=num_heads)
         scaled_logits = logits / jnp.maximum(1e-5, temperature)
         x_0_pred = jax.random.categorical(rng_step, scaled_logits, axis=-1)
 
-        # 2. Tính xác suất mở mặt nạ
+        # 2. Compute analytic unmasking probability
         is_masked = (x == tokenizer.mask_id)
         if step == num_steps - 1:
             unmask_prob = 1.0
@@ -62,26 +64,25 @@ def visualize_sampling_trajectory(
         unmask_flags = jax.random.bernoulli(rng_unmask, p=unmask_prob, shape=(1, seq_len))
         should_unmask = is_masked & unmask_flags
 
-        # 3. Cập nhật chuỗi
+        # 3. Update sequence
         x = jnp.where(should_unmask, x_0_pred, x)
 
-        # In trạng thái trung gian mỗi vài bước
+        # Log intermediate state
         masked_count = int(jnp.sum(x == tokenizer.mask_id))
         pct_masked = (masked_count / seq_len) * 100.0
         
         current_text = tokenizer.decode(list(x[0]))
         step_num = step + 1
-        print(f"Bước [{step_num:02d}/{num_steps:02d}] (t={t_next_val:.2f} | Còn {masked_count:02d} masks - {pct_masked:4.1f}%):")
+        print(f"Step [{step_num:02d}/{num_steps:02d}] (t={t_next_val:.2f} | Remaining masks: {masked_count:02d} - {pct_masked:4.1f}%):")
         print(f"  {current_text}")
 
     print("\n" + "=" * 75)
-    print(" KẾT QUẢ CUỐI CÙNG HOÀN TOÀN KHỬ NHIỄU:")
+    print(" FINAL FULLY DENOISED OUTPUT:")
     print(f"  \"{tokenizer.decode(list(x[0]))}\"")
     print("=" * 75)
 
 
 if __name__ == "__main__":
-    # Minh họa nhanh với trọng số ngẫu nhiên
     tokenizer = CharTokenizer()
     rng = jax.random.PRNGKey(42)
     rng_init, rng_sample = jax.random.split(rng)

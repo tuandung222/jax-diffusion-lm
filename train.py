@@ -1,25 +1,25 @@
 """
 ================================================================================
-SCRIPT HUẤN LUYỆN: MINI DIFFUSION LANGUAGE MODEL VỚI TỐI ƯU HÓA MUON (PURE JAX)
+TRAINING SCRIPT: MINI DIFFUSION LANGUAGE MODEL WITH MUON OPTIMIZER (PURE JAX)
 ================================================================================
-Kịch bản huấn luyện hoàn chỉnh, tích hợp mọi thành phần đã xây dựng:
-1. Mô hình Bidirectional Transformer với điều kiện hóa bước thời gian (Time Conditioning).
-2. Quy trình khuếch tán rời rạc (Discrete Masked Diffusion - MDLM).
-3. Trình tối ưu hóa Muon (Newton-Schulz Polar Decomposition) kết hợp AdamW.
-4. Lập lịch tốc độ học Cosine Warmup.
-5. Biên dịch hàm toàn vẹn từ Gradient đến Update bằng `jax.jit`.
+An end-to-end training pipeline combining all built-from-scratch components:
+1. Bidirectional Transformer with Timestep Conditioning.
+2. Discrete Masked Diffusion (MDLM) process.
+3. Muon Optimizer (Newton-Schulz Polar Decomposition) with AdamW hybrid partitioning.
+4. Cosine Warmup Learning Rate Scheduler.
+5. High-performance fused compilation from Gradient to Parameter Update via `jax.jit`.
 
-TẠI SAO `jax.value_and_grad` VƯỢT TRỘI HƠN PYTORCH TRONG THIẾT KẾ GIẢNG DẠY?
---------------------------------------------------------------------------
-Trong PyTorch, ta gọi `loss.backward()`, các gradient được tích lũy ngầm vào thuộc
-tính `.grad` của từng Tensor (stateful).
-Trong JAX:
+WHY `jax.value_and_grad` IS CLEANER FOR FIRST-PRINCIPLES LEARNING:
+------------------------------------------------------------------
+In PyTorch, calling `loss.backward()` invisibly accumulates gradients as side-effects
+into `.grad` tensor attributes.
+In JAX:
   `grad_fn = jax.grad(loss_fn)`
   `grads = grad_fn(params)`
-Gradient là một giá trị toán học thuần khiết (Pure Value), có cấu trúc PyTree y hệt
-`params`. `jax.value_and_grad(loss_fn, has_aux=True)` vừa trả về giá trị hàm mất mát,
-các chỉ số phụ (như độ chính xác), vừa trả về toàn bộ gradient trong một lần duyệt
-đồ thị tính toán (Reverse-mode Automatic Differentiation) tối ưu nhất!
+Gradients are first-class, immutable PyTrees with the exact same layout as `params`.
+Using `jax.value_and_grad(loss_fn, has_aux=True)` computes the scalar loss,
+monitoring metrics (accuracy, masking ratio), and all partial gradients in a single
+reverse-mode automatic differentiation pass.
 """
 
 import time
@@ -36,9 +36,9 @@ from src.utils import print_model_summary, prepare_dataset
 
 
 # ==============================================================================
-# TẬP DỮ LIỆU MẪU DÀNH CHO HUẤN LUYỆN NHANH (EDUCATIONAL TOY CORPUS)
+# EDUCATIONAL TOY TRAINING CORPUS
 # ==============================================================================
-# Một đoạn văn bản triết học & khoa học máy tính đa dạng để mô hình học cấu trúc câu
+# Diverse text discussing AI, diffusion mathematics, and optimization
 TOY_CORPUS = """
 Artificial intelligence and deep learning have transformed the way we understand computation and cognition.
 Diffusion models represent a paradigm shift in generative modeling, moving away from simple autoregressive next token prediction.
@@ -56,29 +56,29 @@ Linear warmup stabilizes the initial noisy gradients before cosine annealing gui
 
 def main():
     print("=" * 75)
-    print(" BẮT ĐẦU CHƯƠNG TRÌNH HUẤN LUYỆN JAX DIFFUSION LM VỚI MUON OPTIMIZER")
+    print(" STARTING PURE JAX DIFFUSION LM TRAINING WITH MUON OPTIMIZER")
     print("=" * 75)
 
-    # 1. Khởi tạo thiết bị và hạt giống ngẫu nhiên
+    # 1. Device detection and master PRNG key initialization
     devices = jax.devices()
-    print(f"Thiết bị tính toán JAX: {devices}")
+    print(f"JAX Computational Devices: {devices}")
     
     master_key = jax.random.PRNGKey(2026)
     master_key, k_init, k_train = jax.random.split(master_key, 3)
 
-    # 2. Xây dựng Tokenizer và nạp dữ liệu
+    # 2. Tokenizer initialization and dataset preparation
     tokenizer = CharTokenizer([TOY_CORPUS])
-    print(f"Kích thước từ vựng ký tự (Vocab Size): {tokenizer.vocab_size} tokens")
-    print(f"Token đặc biệt: MASK_ID={tokenizer.mask_id}, PAD_ID={tokenizer.pad_id}")
+    print(f"Character Vocabulary Size: {tokenizer.vocab_size} tokens")
+    print(f"Special Tokens: MASK_ID={tokenizer.mask_id}, PAD_ID={tokenizer.pad_id}")
 
-    # Lặp lại văn bản để tạo tập dữ liệu đủ lớn cho các bước cập nhật
+    # Replicate text to create sufficient training samples
     full_text = TOY_CORPUS * 50
     seq_len = 64
     dataset = prepare_dataset(full_text, tokenizer, seq_len=seq_len)
     num_samples = dataset.shape[0]
-    print(f"Đã chuẩn bị {num_samples} mẫu câu huấn luyện với độ dài cố định L={seq_len} ký tự.")
+    print(f"Prepared {num_samples} training samples of fixed length L={seq_len} characters.")
 
-    # 3. Cấu hình siêu tham số mô hình (Hyperparameters)
+    # 3. Model Hyperparameters
     d_model = 128
     num_heads = 4
     num_layers = 4
@@ -89,7 +89,7 @@ def main():
     base_lr = 2e-3
     weight_decay = 0.01
 
-    print("\n--- Khởi tạo tham số mô hình thuần JAX ---")
+    print("\n--- Initializing Pure JAX Model Parameters ---")
     params = init_transformer_params(
         k_init,
         vocab_size=tokenizer.vocab_size,
@@ -101,23 +101,22 @@ def main():
     )
     print_model_summary(params)
 
-    # 4. Khởi tạo trạng thái bộ tối ưu Muon + AdamW
-    print("\n--- Khởi tạo trạng thái Muon Optimizer (Newton-Schulz) ---")
+    # 4. Initialize Muon + AdamW hybrid optimizer state
+    print("\n--- Initializing Muon Optimizer State (Newton-Schulz) ---")
     opt_state = init_muon_state(params)
-    print(f"Trạng thái optimizer ban đầu tại step: {opt_state.step}")
+    print(f"Initial optimizer state step: {opt_state.step}")
 
     # ==========================================================================
-    # ĐỊNH NGHĨA BƯỚC HUẤN LUYỆN THUẦN KHIẾT (COMPILED JAX JIT STEP)
+    # PURE FUNCTIONAL JIT-COMPILED TRAINING STEP
     # ==========================================================================
-    # Toàn bộ phép tính: Lan truyền tiến -> Tính Loss -> Tự động tính vi phân (Grad)
-    # -> Cập nhật Newton-Schulz cho ma trận 2D -> Cập nhật AdamW cho 1D
-    # đều được XLA nung thành một chuỗi Kernel GPU/Metal duy nhất!
+    # Forward Pass -> Loss Calculation -> Value and Grad -> Muon/AdamW Update
+    # are fused into an optimized accelerator kernel by XLA.
     @jax.jit
     def train_step(params, opt_state, batch, rng, lr):
         """
-        Hàm thực hiện một bước huấn luyện nguyên tử (Atomic Training Step).
+        Executes a single atomic training step.
         """
-        # Định nghĩa hàm loss bao đóng nhận params làm biến số vi phân
+        # Closure taking params as the sole differentiable argument
         def loss_wrapper(p):
             return compute_loss(
                 p,
@@ -128,10 +127,10 @@ def main():
                 num_heads=num_heads
             )
 
-        # Tính đạo hàm riêng toàn bộ ma trận trọng số trong 1 lệnh duy nhất
+        # Compute loss, metrics, and partial gradients simultaneously
         (loss, metrics), grads = jax.value_and_grad(loss_wrapper, has_aux=True)(params)
 
-        # Cập nhật trọng số qua thuật toán Muon
+        # Update parameters using the Muon optimizer
         new_params, new_opt_state = muon_step(
             params=params,
             grads=grads,
@@ -143,8 +142,8 @@ def main():
 
         return new_params, new_opt_state, metrics
 
-    # 5. Vòng lặp huấn luyện chính (Training Loop)
-    print("\n--- Bắt đầu vòng lặp huấn luyện (Training Loop) ---")
+    # 5. Main Training Loop
+    print("\n--- Starting Training Loop ---")
     start_time = time.time()
     
     num_batches = num_samples // batch_size
@@ -152,11 +151,11 @@ def main():
     for step in range(1, total_steps + 1):
         k_train, k_step, k_sample = jax.random.split(k_train, 3)
 
-        # Lấy mini-batch xoay vòng đơn giản
+        # Fetch mini-batch
         batch_idx = (step - 1) % num_batches
         batch = dataset[batch_idx * batch_size : (batch_idx + 1) * batch_size]
 
-        # Tính learning rate theo lịch Cosine Warmup
+        # Compute dynamic learning rate via Cosine Warmup Schedule
         current_lr = cosine_warmup_schedule(
             step=step,
             base_lr=base_lr,
@@ -164,28 +163,28 @@ def main():
             total_steps=total_steps
         )
 
-        # Chạy bước huấn luyện tăng tốc XLA
+        # Execute JIT-compiled optimization step
         params, opt_state, metrics = train_step(params, opt_state, batch, k_step, current_lr)
 
-        # In nhật ký huấn luyện định kỳ
+        # Periodic logging
         if step == 1 or step % 25 == 0:
             elapsed = time.time() - start_time
             loss_val = float(metrics["loss"])
             acc_val = float(metrics["masked_acc"]) * 100.0
             ratio_val = float(metrics["masked_ratio"]) * 100.0
             print(
-                f"Bước [{step:03d}/{total_steps:03d}] | "
+                f"Step [{step:03d}/{total_steps:03d}] | "
                 f"Loss: {loss_val:.4f} | "
                 f"Masked Acc: {acc_val:5.1f}% | "
-                f"Tỷ lệ che: {ratio_val:4.1f}% | "
+                f"Mask Ratio: {ratio_val:4.1f}% | "
                 f"LR: {float(current_lr):.6f} | "
-                f"Thời gian: {elapsed:.1f}s"
+                f"Elapsed: {elapsed:.1f}s"
             )
 
-        # 6. Trình diễn quá trình sinh câu (Denoising Generation) mỗi 50 bước
+        # 6. Showcase intermediate reverse diffusion sampling every 50 steps
         if step % 50 == 0:
             print("\n" + "-" * 60)
-            print(f" TRÌNH DIỄN SINH KHUẾCH TÁN (DIFFUSION SAMPLING) TẠI BƯỚC {step}:")
+            print(f" INTERMEDIATE DIFFUSION SAMPLING AT STEP {step}:")
             print("-" * 60)
             generated_ids = sample_tokens(
                 params=params,
@@ -198,12 +197,12 @@ def main():
                 temperature=0.8
             )
             generated_text = tokenizer.decode(list(generated_ids[0]))
-            print(f"Văn bản sinh ra:\n\"{generated_text}\"")
+            print(f"Generated text sample:\n\"{generated_text}\"")
             print("-" * 60 + "\n")
 
     total_time = time.time() - start_time
     print("=" * 75)
-    print(f" HOÀN THÀNH HUẤN LUYỆN! Tổng thời gian chạy: {total_time:.2f} giây.")
+    print(f" TRAINING COMPLETE! Total runtime: {total_time:.2f} seconds.")
     print("=" * 75)
 
 

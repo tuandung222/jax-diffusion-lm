@@ -1,29 +1,28 @@
 """
 ================================================================================
-MÔ-ĐUN TOKENIZER: CHARACTER-LEVEL TOKENIZER CHO DIFFUSION LM
+TOKENIZER MODULE: CHARACTER-LEVEL TOKENIZER FOR DIFFUSION LM
 ================================================================================
-Triển khai bộ mã hóa cấp độ ký tự (Character-level Tokenizer) độc lập, không dùng
-các thư viện ngoài như HuggingFace Tokenizers hay Tiktoken.
+A self-contained character-level tokenizer with zero third-party dependencies
+(no HuggingFace Tokenizers, SentencePiece, or Tiktoken needed).
 
-VAI TRÒ CỦA TOKENIZER TRONG MÔ HÌNH DIFFUSION LANGUAGE MODEL:
-------------------------------------------------------------
-Khác với các mô hình sinh tự hồi quy (Autoregressive - AR như GPT) chỉ cần sinh tiếp
-token kế tiếp từ trái sang phải, mô hình Discrete Diffusion LM (như MDLM, D3PM)
-sử dụng cơ chế "Khuếch tán Rời rạc" với trạng thái hấp thụ (Absorbing State):
+ROLE OF THE TOKENIZER IN DIFFUSION LANGUAGE MODELING:
+---------------------------------------------------
+Unlike autoregressive next-token prediction (GPT), Discrete Masked Diffusion
+operates with an Absorbing State:
 
-1. Token đặc biệt `<mask>` đóng vai trò là "Nhiễu Cực Đại" (Pure Noise / Absorbing State).
-   Ở thời điểm t=1.0, toàn bộ chuỗi văn bản là các token `<mask`>.
-2. Mô hình học cách khôi phục lại ký tự nguyên bản từ các vị trí đang bị che bởi `<mask`>.
-3. Token `<pad>` được sử dụng để căn chỉnh độ dài chuỗi trong một lô (batch).
-4. Token `<bos>` và `<eos>` đánh dấu điểm bắt đầu và kết thúc chuỗi văn bản.
-5. Token `<unk>` đại diện cho các ký tự nằm ngoài từ vựng.
+1. The `<mask`> special token serves as the maximum entropy state (Pure Noise).
+   At timestep t = 1.0, the sequence is composed entirely of `<mask`> tokens.
+2. The neural network learns to recover the original characters at masked locations.
+3. `<pad>` is used for batch sequence padding.
+4. `<bos>` and `<eos>` denote the beginning and end of text sequences.
+5. `<unk>` handles any unseen or out-of-vocabulary characters.
 
-ƯU ĐIỂM KHI DÙNG CHARACTER TOKENIZER CHO MỤC ĐÍCH GIẢNG DẠY:
------------------------------------------------------------
-- Kích thước từ vựng nhỏ gọn (khoảng 100 - 150 tokens thay vì 32,000 - 128,000 như BPE).
-- Giúp ma trận đầu ra và tính toán Softmax cực kỳ nhẹ, có thể huấn luyện và thử nghiệm
-  ngay trên CPU hoặc GPU tích hợp của Apple M4 mà không lo tràn VRAM.
-- Trực quan hóa quá trình khử nhiễu (Denoising) từng bước sinh chữ cực kỳ rõ ràng!
+WHY CHARACTER TOKENIZATION FOR EDUCATIONAL STUDY?
+------------------------------------------------
+- Compact vocabulary size (~50-150 tokens vs. 32,000-128,000 for BPE).
+- Dramatically lowers memory footprint and softmax overhead, enabling full training
+  and inference directly on laptop CPUs or Apple Silicon M4 without OOM risks.
+- Provides a clean, transparent visualization of the unmasking/denoising trajectory!
 """
 
 from typing import List, Dict, Optional, Any, Union
@@ -31,7 +30,7 @@ from typing import List, Dict, Optional, Any, Union
 
 class CharTokenizer:
     """
-    Bộ mã hóa cấp độ ký tự hỗ trợ các token đặc biệt phục vụ Diffusion Language Modeling.
+    Character-level tokenizer supporting special tokens for Masked Diffusion LM.
     """
     
     PAD_TOKEN = "<pad>"
@@ -42,13 +41,12 @@ class CharTokenizer:
 
     def __init__(self, texts: Optional[List[str]] = None):
         """
-        Khởi tạo từ vựng từ danh sách văn bản mẫu hoặc từ tập ký tự ASCII in được.
-        
+        Initializes the character vocabulary from sample texts or default ASCII.
+
         Args:
-            texts: Danh sách các chuỗi văn bản huấn luyện để xây dựng tập ký tự độc nhất.
-                   Nếu None, mặc định sử dụng bảng mã chuẩn ASCII in được.
+            texts: List of strings used to build the unique character set.
+                   If None, defaults to printable ASCII characters.
         """
-        # Danh sách token đặc biệt luôn được ưu tiên đặt ở đầu bảng mã
         self.special_tokens = [
             self.PAD_TOKEN,
             self.MASK_TOKEN,
@@ -58,20 +56,16 @@ class CharTokenizer:
         ]
         
         if texts:
-            # Thu thập toàn bộ ký tự độc nhất xuất hiện trong dữ liệu huấn luyện
             unique_chars = sorted(list(set("".join(texts))))
         else:
-            # Mặc định: Tập ký tự in được chuẩn ASCII (từ mã 32 đến 126) + xuống dòng, thụt lề
             unique_chars = [chr(i) for i in range(32, 127)] + ["\n", "\t"]
             
-        # Ghép các token đặc biệt và các ký tự thường thành từ vựng hoàn chỉnh
         all_tokens = self.special_tokens + [c for c in unique_chars if c not in self.special_tokens]
         
-        # Tạo từ điển ánh xạ hai chiều: Ký tự -> ID và ID -> Ký tự
         self.char_to_id: Dict[str, int] = {c: i for i, c in enumerate(all_tokens)}
         self.id_to_char: Dict[int, str] = {i: c for i, c in enumerate(all_tokens)}
         
-        # Lưu trữ sẵn chỉ số (ID) của các token đặc biệt để truy xuất tức thời O(1)
+        # Pre-cache IDs of special tokens for O(1) lookup
         self.pad_id = self.char_to_id[self.PAD_TOKEN]
         self.mask_id = self.char_to_id[self.MASK_TOKEN]
         self.bos_id = self.char_to_id[self.BOS_TOKEN]
@@ -80,25 +74,22 @@ class CharTokenizer:
 
     @property
     def vocab_size(self) -> int:
-        """Kích thước từ vựng (tổng số lượng token)."""
+        """Total vocabulary size."""
         return len(self.char_to_id)
 
     def encode(self, text: str) -> List[int]:
-        """
-        Chuyển đổi chuỗi văn bản đầu vào thành danh sách các token ID số nguyên.
-        Các ký tự chưa từng gặp trong từ vựng sẽ được thay thế bằng unk_id.
-        """
+        """Converts an input string into a list of integer token IDs."""
         return [self.char_to_id.get(c, self.unk_id) for c in text]
 
     def decode(self, token_ids: Any) -> str:
         """
-        Giải mã danh sách các token ID trở lại chuỗi ký tự ban đầu.
-        Chấp nhận cả List[int], numpy array hoặc JAX DeviceArray.
-        
-        LƯU Ý TRỰC QUAN HÓA:
-        - Các vị trí còn mang token `<mask`> sẽ được hiển thị bằng ký tự khối vuông '█'
-          để người dùng dễ dàng quan sát quá trình unmasking từng bước của Diffusion.
-        - Các token kiểm soát như `<pad>`, `<bos>`, `<eos>` sẽ được ẩn đi để văn bản rõ ràng.
+        Decodes a list or array of token IDs back into a human-readable string.
+        Accepts List[int], numpy arrays, or JAX DeviceArrays.
+
+        VISUALIZATION NOTE:
+        - Remaining `<mask`> tokens are rendered as the block character '█'
+          to make the step-by-step unmasking trajectory intuitive and visually clear.
+        - Special tokens (<pad>, <bos>, <eos>) are omitted from rendered text.
         """
         if hasattr(token_ids, "tolist"):
             token_ids = token_ids.tolist()
@@ -108,7 +99,7 @@ class CharTokenizer:
             tid_int = int(tid)
             char = self.id_to_char.get(tid_int, "")
             if char == self.MASK_TOKEN:
-                chars.append("█")  # Biểu diễn trực quan cho token còn đang bị che
+                chars.append("█")  # Visual representation of masked token
             elif char not in self.special_tokens:
                 chars.append(char)
         return "".join(chars)
