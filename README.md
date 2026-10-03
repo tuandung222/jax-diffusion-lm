@@ -1,148 +1,118 @@
-# 🧠 Pure JAX Diffusion Language Model (DLM) from Scratch
+# jax-diffusion-lm
 
-An educational, first-principles implementation of a **Discrete Masked Diffusion Language Model (MDLM)** built entirely from scratch in **100% Pure JAX**.
+A minimal, self-contained implementation of a **Discrete Masked Diffusion Language Model (MDLM)** and the **Muon optimizer** written from scratch in pure JAX.
 
-All core components are implemented without high-level neural network libraries:
-- 🏗️ **Model Backbone**: Bidirectional Transformer with continuous **Timestep Conditioning**.
-- ⚡ **Optimizer**: **Muon Optimizer** (Momentum Orthogonalized by Newton-Schulz) paired with an **AdamW** hybrid partition.
-- 📉 **Learning Rate Scheduler**: **Cosine Warmup Scheduler** implemented as a branchless, JIT-compatible pure function.
-- 🌪️ **Diffusion Mechanics**: **Discrete Masked Diffusion (MDLM / Absorbing State)** featuring forward noising and reverse ancestral sampling.
+No Flax. No Haiku. No Optax. No PyTorch. No HuggingFace.
 
-> **Zero Framework Overhead**: No Flax, Haiku, Trax, PyTorch, Optax, or HuggingFace. Parameters and states are managed purely as **JAX PyTrees**, differentiated via `jax.value_and_grad`, and fused into high-throughput accelerator kernels via `jax.jit`.
+Just functional JAX, explicit PyTree parameters, and XLA compilation (`jax.jit`).
 
 ---
 
-## 📐 1. Architecture & Information Flow
+## Why this exists
 
-```mermaid
-flowchart LR
-    Clean[Clean Tokens x_0] --> Forward[Forward Noising q - Masking prob t]
-    Forward --> Corrupted[Corrupted Sequence x_t with MASK]
-    Corrupted --> Transformer[Pure JAX Bidirectional Transformer]
-    TimeStep[Continuous Timestep t] --> Sinusoidal[Sinusoidal Time Embedding]
-    Sinusoidal --> Transformer
-    Transformer --> Logits[Predicted Vocab Logits x_0]
-    Logits --> Loss[Cross-Entropy Loss on MASK positions]
-    Loss --> AutoGrad[jax.value_and_grad]
-    AutoGrad --> MuonOpt[Muon Optimizer - Newton-Schulz]
-    MuonOpt --> Update[Updated PyTree Params]
-```
+Most diffusion codebases are either written for continuous 2D image latents (DDPM, Stable Diffusion) or buried under heavy framework abstractions.
+
+This repository implements discrete text diffusion from first principles:
+
+1. **Discrete Masked Diffusion over continuous Gaussian noise**: Continuous diffusion on text requires projecting Gaussian vectors back onto discrete token embeddings ("rounding"), which often collapses representation spaces. Masked diffusion instead defines a continuous-time Markov chain directly on discrete states, using `[MASK]` as an absorbing state.
+2. **Bidirectional context instead of causal masking**: Autoregressive models (GPT) generate strictly left-to-right using triangular masks. Masked diffusion models evaluate all visible tokens bidirectionally, learning to infill missing spans arbitrarily.
+3. **Muon optimizer from scratch**: Implements Keller Jordan's Newton-Schulz iteration (polar decomposition) to update 2D weight matrices with orthogonalized momentum, paired with AdamW for 1D vectors and embedding tables.
 
 ---
 
-## 🔬 2. Core Mathematical Foundations
+## Core Mechanics
 
-### 2.1. Why Discrete Masked Diffusion Instead of Continuous Gaussian Noise?
-In continuous domains such as computer vision (DDPM, Stable Diffusion), data points live in continuous real space $\mathbf{x} \in \mathbb{R}^D$, permitting additive Gaussian perturbations $\mathcal{N}(0, \sigma^2 I)$.
+### 1. Forward Corruption & Loss
+Given a clean sequence $x_0 \in \mathcal{V}^L$ and continuous time $t \in (0, 1]$:
 
-In natural language:
-- Text is composed of **discrete tokens** from a finite vocabulary $\mathcal{V}$.
-- Adding Gaussian noise to token embeddings and projecting ("rounding") back onto discrete vocabulary entries introduces substantial discretization errors and leads to representation collapse.
-- **Masked Diffusion (MDLM)** defines a continuous-time Markov chain directly on the discrete categorical state space, using a special `[MASK]` token as the **absorbing state**:
-  
-$$\mathbf{q}(x_t \mid x_0) = \prod_{i=1}^L \left( (1 - t)\delta(x_t^i, x_0^i) + t \delta(x_t^i, [\text{MASK}]) \right)$$
+$$q(x_t \mid x_0) = \prod_{i=1}^L \left( (1 - t)\delta(x_t^i, x_0^i) + t \delta(x_t^i, [\text{MASK}]) \right)$$
 
-At $t = 0$: Clean sequence ($0\%$ noise).  
-At $t = 1$: Fully masked sequence ($100\%$ noise / maximum entropy).
+Each token independently transitions to `[MASK]` with probability $t$. The variational lower bound (ELBO) simplifies to categorical cross-entropy computed **strictly on the corrupted positions**:
 
-### 2.2. Variational Training Objective (ELBO)
-The continuous-time Evidence Lower Bound (ELBO) for absorbing discrete diffusion simplifies into a categorical cross-entropy loss evaluated **strictly over masked positions**:
+$$\mathcal{L}(\theta) = \mathbb{E}_{t, x_t} \left[ \frac{1}{\sum_i \mathbb{I}(x_t^i = [\text{MASK}])} \sum_{i: x_t^i = [\text{MASK}]} -\log p_\theta(x_0^i \mid x_t, t) \right]$$
 
-$$\mathcal{L}(\theta) = \mathbb{E}_{t \sim \mathcal{U}(0, 1), \, x_t \sim q(x_t \mid x_0)} \left[ \frac{1}{\sum_{i} \mathbb{I}(x_t^i = [\text{MASK}])} \sum_{i: x_t^i = [\text{MASK}]} -\log p_\theta(x_0^i \mid x_t, t) \right]$$
+Unmasked tokens already reveal the ground truth; calculating loss on them would degrade training into trivial identity copying.
 
-> **Important**: Computing loss on uncorrupted tokens is intentionally skipped. Unmasked positions already reveal the ground truth to the model; calculating loss there would encourage trivial identity copying rather than contextual reasoning.
+### 2. Reverse Sampling (Denoising)
+Generation starts at $t = 1.0$ from an array of 100% `[MASK]` tokens. For each step transitioning from $t$ down to $t_{\text{next}}$:
 
-### 2.3. Reverse Ancestral Sampling Trajectory
-Generation starts from a sequence of pure `[MASK]` tokens at $t = 1.0$. Iterating backward over discrete intervals from $t$ down to $t_{\text{next}} = t - \Delta t$:
-1. The model attends bidirectionally to all visible context to predict the categorical distribution of clean tokens: $\hat{x}_0 \sim \text{Categorical}(\text{logits} / \tau)$.
-2. Each currently masked token has an analytic transition probability of unmasking at this step:
+1. Forward pass predicts $\hat{x}_0 \sim \text{Categorical}(\text{logits} / \tau)$.
+2. Each currently masked position unmasks with probability:
    
 $$P(\text{unmask}) = \frac{t - t_{\text{next}}}{t}$$
 
-3. If unmasked, the position is updated with its sampled prediction $\hat{x}_0$. If retained as `[MASK]`, it remains masked until subsequent steps where it can be resolved with richer bidirectional context.
+3. Tokens that do not unmask remain `[MASK]` to be resolved in later steps with richer bidirectional context.
+
+### 3. Muon: Momentum Orthogonalized by Newton-Schulz
+Standard optimizers allow singular values of weight matrices to grow unevenly. Muon computes the orthogonal polar factor $O = M(M^T M)^{-1/2}$ of momentum matrix $M$ using 5 iterations of a quintic polynomial:
+
+$$X_0 = \frac{M}{\|M\|_F + \epsilon}, \quad X_{k+1} = a X_k + b (X_k X_k^T) X_k + c (X_k X_k^T)^2 X_k$$
+
+with coefficients $a = 3.4445, b = -4.7750, c = 2.0315$.
+
+- **2D weight matrices** (Attention projections, MLP weights) are updated with Muon.
+- **1D parameters & Embeddings** (Biases, LayerNorm scales, Embedding tables) are updated with AdamW.
 
 ---
 
-## ⚡ 3. The Muon Optimizer (Pure JAX)
+## Quickstart
 
-**Muon** (*Momentum Orthogonalized by Newton-Schulz*) is an optimizer designed by Keller Jordan:
-
-```mermaid
-flowchart TD
-    Grad[Gradient Matrix G] --> Mom[Accumulate Momentum: M = beta*M + 1-beta*G]
-    Mom --> Check{Parameter Rank}
-    Check -- 2D Weights Linear/Attention --> NS[Newton-Schulz Polar Factorization]
-    NS --> Quintic[Quintic Iteration: aX + bXXtX + cXXt2X]
-    Quintic --> Ortho[Orthogonal Polar Matrix O]
-    Ortho --> MuonUpdate[W = W - lr * scale * O]
-    Check -- 1D Bias / Norm / Embeddings --> AdamW[AdamW with 1st and 2nd moments]
-```
-
-### 5th-Order Newton-Schulz Iteration:
-To compute the polar factor $O = M (M^T M)^{-1/2}$ of a momentum matrix $M \in \mathbb{R}^{m \times n}$ without expensive SVD operations $\mathcal{O}(mn^2)$, Muon normalizes $X_0 = M / (\|M\|_F + \epsilon)$ and evaluates 5 iterations of a quintic polynomial:
-
-$$X_{k+1} = a X_k + b (X_k X_k^T) X_k + c (X_k X_k^T)^2 X_k$$
-
-Optimal coefficients: $a = 3.4445$, $b = -4.7750$, $c = 2.0315$.  
-This polynomial pulls all singular values rapidly toward $1.0$, equalizing update energy across all subspace dimensions.
-
----
-
-## 📁 4. Project Layout
-
-```text
-jax-diffusion-lm/
-├── README.md                 # Theoretical foundation, math derivation, and guide
-├── requirements.txt          # Minimal dependencies (JAX + NumPy only)
-├── train.py                  # End-to-end training script with JIT compilation & Muon
-├── sample.py                 # Reverse diffusion unmasking visualization
-└── src/
-    ├── __init__.py           # Package interface
-    ├── model.py              # Pure JAX Bidirectional Transformer + Timestep MLP
-    ├── diffusion.py          # Discrete Masked Diffusion (q_sample, loss, sample)
-    ├── tokenizer.py          # Standalone character tokenizer (zero external deps)
-    ├── utils.py              # PyTree inspection, parameter counting, batching
-    └── optimizers/
-        ├── __init__.py       # Optimizer exports
-        ├── muon.py           # Pure JAX Muon optimizer (Newton-Schulz + AdamW hybrid)
-        └── schedulers.py     # Branchless Cosine Warmup scheduler in JAX
-```
-
----
-
-## 🚀 5. Getting Started
-
-### 5.1. Environment Setup
-Install minimal dependencies:
+### Setup
 ```bash
 pip install -r requirements.txt
 ```
 
-### 5.2. Visualizing Reverse Diffusion Unmasking (Inference)
-Observe how the sequence evolves from pure noise (`████████`) into coherent characters:
+*(Requires `jax`, `jaxlib`, and `numpy`. Runs out-of-the-box on CPU, Apple Silicon GPU via Metal, or CUDA).*
+
+### 1. Reverse Diffusion Demo
+Visualize the step-by-step unmasking process (from pure noise to text):
 ```bash
 python sample.py
 ```
-**Terminal Output:**
+
+Output:
 ```text
-===========================================================================
- VISUALIZING REVERSE DIFFUSION DENOISING TRAJECTORY
- Reverse Steps: 10 | Length: 64 chars | Temperature: 0.8
-===========================================================================
 Step [00/10] (t=1.00 - 100% Noise):
   ████████████████████████████████████████████████████████████████
-
-Step [01/10] (t=0.90 | Remaining masks: 56 - 87.5%):
-  ████████████BV███████████F█████████C███████A████████(█o█r███████
+Step [02/10] (t=0.80 | Remaining masks: 49 - 76.6%):
+  █n████████<█BV██████a████F████████sC███&███A█B█████>(█o█r███████
 Step [05/10] (t=0.50 | Remaining masks: 31 - 48.4%):
   █ny█U██)█]<█BV3██t]█a███FI██r^██sC█\█&	o█A(B█O██g>(█o█r███████
 Step [10/10] (t=0.00 | Remaining masks: 00 -  0.0%):
   %ny\U6()[]<RBV3"<t]*ag_)FIUKr^}OsCL\e&	oGA(BRO@\g>(aofr+c~1ki
 ```
 
-### 5.3. Training the Model with Muon
-Train on the toy corpus and watch loss decline with real-time text generations:
+### 2. Train
+Train the model on a toy corpus with fused `jax.jit` compilation:
 ```bash
 python train.py
 ```
-The XLA compiler (`jax.jit`) fuses the forward pass, backward pass (`value_and_grad`), and Newton-Schulz polynomial iterations into a single accelerated kernel.
+
+On an Apple M4, 250 optimization steps take ~17 seconds, with loss, masked accuracy, and intermediate generations reported periodically.
+
+---
+
+## File Structure
+
+```text
+.
+├── train.py                  # Training loop with jax.value_and_grad and jax.jit
+├── sample.py                 # Step-by-step reverse sampling demo
+├── requirements.txt          # Minimal dependencies
+└── src/
+    ├── model.py              # Bidirectional Transformer with Timestep MLP
+    ├── diffusion.py          # Forward corruption, ELBO loss, and reverse sampling
+    ├── tokenizer.py          # Minimal character tokenizer
+    ├── utils.py              # PyTree inspection, parameter counting, batching
+    └── optimizers/
+        ├── muon.py           # Pure JAX Muon (Newton-Schulz) + AdamW hybrid
+        └── schedulers.py     # Branchless Cosine Warmup scheduler
+```
+
+---
+
+## References
+
+- **MDLM**: Sahoo et al., *Simple and Effective Masked Diffusion Language Models* (2024).
+- **D3PM**: Austin et al., *Structured Denoising Diffusion Models in Discrete State-Spaces* (NeurIPS 2021).
+- **Muon**: Keller Jordan et al., *Muon: An optimizer for hidden layers in neural networks* (2024), implemented in [modded-nanogpt](https://github.com/KellerJordan/modded-nanogpt).
